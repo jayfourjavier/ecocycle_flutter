@@ -46,3 +46,34 @@ app.*.map.json
 
 # Widget Preview related
 .widget_preview/
+
+# Release artifacts
+*.apk
+*.aab
+*.ap_
+
+# Signing keys and secrets
+*.jks
+*.keystore
+key.properties
+**/android/key.properties
+.env
+.env.*
+
+# Local machine configuration
+local.properties
+**/android/local.properties
+.flutter-plugins
+.flutter-plugin-dependencies
+
+# Firebase configuration (generate per environment, see README)
+google-services.json
+GoogleService-Info.plist
+lib/firebase_options.dart
+.firebase/
+firebase-debug.log
+firebase-debug.*.log
+
+# OS / editor
+Thumbs.db
+*.code-workspace
