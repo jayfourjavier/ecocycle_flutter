@@ -1,11 +1,18 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter/material.dart';
 
+import 'about_page.dart';
 import 'firebase_options.dart';
+import 'login_page.dart';
+import 'pin_lock.dart';
+import 'settings_page.dart';
+
+final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 
 /// Maps the numeric `activity` value in Realtime Database to a display label.
 /// Edit this map to match the codes your ESP32 sends.
@@ -31,6 +38,7 @@ class EcoCycleApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
+      navigatorKey: navigatorKey,
       debugShowCheckedModeBanner: false,
       title: 'ECOCYCLE Dashboard',
       theme: ThemeData(
@@ -38,7 +46,149 @@ class EcoCycleApp extends StatelessWidget {
         colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF287D46)),
         scaffoldBackgroundColor: const Color(0xFFF4F7F5),
       ),
-      home: const DashboardPage(),
+      home: const AuthGate(),
+    );
+  }
+}
+
+/// Login once (Firebase keeps the session), then unlock with a PIN each time
+/// the app is opened or returns from the background.
+class AuthGate extends StatefulWidget {
+  const AuthGate({super.key});
+
+  @override
+  State<AuthGate> createState() => _AuthGateState();
+}
+
+class _AuthGateState extends State<AuthGate> {
+  late final AppLifecycleListener _lifecycle;
+
+  void _onLockChanged() {
+    // Drop any pages (settings, etc.) pushed over the dashboard when locking.
+    if (AppLock.instance.locked) {
+      navigatorKey.currentState?.popUntil((route) => route.isFirst);
+    }
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    AppLock.instance.addListener(_onLockChanged);
+    _lifecycle = AppLifecycleListener(
+      onStateChange: (state) {
+        if (state == AppLifecycleState.paused) AppLock.instance.lock();
+      },
+    );
+  }
+
+  @override
+  void dispose() {
+    AppLock.instance.removeListener(_onLockChanged);
+    _lifecycle.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<User?>(
+      stream: FirebaseAuth.instance.authStateChanges(),
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Scaffold(
+            body: Center(child: CircularProgressIndicator()),
+          );
+        }
+        final user = snapshot.data;
+        if (user == null) return const LoginPage();
+        return _PinGate(key: ValueKey(user.uid), user: user);
+      },
+    );
+  }
+}
+
+class _PinGate extends StatefulWidget {
+  const _PinGate({super.key, required this.user});
+
+  final User user;
+
+  @override
+  State<_PinGate> createState() => _PinGateState();
+}
+
+class _PinGateState extends State<_PinGate> {
+  late Future<PinRecord?> _record = PinService.load(widget.user.uid);
+  bool _resetting = false;
+
+  void _reload() {
+    setState(() {
+      _record = PinService.load(widget.user.uid);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<PinRecord?>(
+      future: _record,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState != ConnectionState.done) {
+          return const Scaffold(
+            body: Center(child: CircularProgressIndicator()),
+          );
+        }
+        if (snapshot.hasError) {
+          return Scaffold(
+            body: Center(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text(
+                      'Could not load your PIN. Check your connection and the '
+                      'database rules, then try again.',
+                      textAlign: TextAlign.center,
+                    ),
+                    const SizedBox(height: 16),
+                    FilledButton(
+                      onPressed: _reload,
+                      child: const Text('Retry'),
+                    ),
+                    TextButton(
+                      onPressed: signOutUser,
+                      child: const Text('Sign out'),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        }
+        final record = snapshot.data;
+        if (record == null || _resetting) {
+          return SetPinPage(
+            uid: widget.user.uid,
+            onCancel: _resetting
+                ? () => setState(() => _resetting = false)
+                : null,
+            onDone: () {
+              AppLock.instance.unlock();
+              _resetting = false;
+              _reload();
+            },
+          );
+        }
+        return ListenableBuilder(
+          listenable: AppLock.instance,
+          builder: (context, _) => AppLock.instance.locked
+              ? UnlockPage(
+                  user: widget.user,
+                  record: record,
+                  onUnlocked: AppLock.instance.unlock,
+                  onForgot: () => setState(() => _resetting = true),
+                )
+              : const DashboardPage(),
+        );
+      },
     );
   }
 }
@@ -154,6 +304,7 @@ class DashboardPage extends StatefulWidget {
 }
 
 class _DashboardPageState extends State<DashboardPage> {
+  final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
   bool isOnline = true;
   int? activityCode;
 
@@ -161,6 +312,7 @@ class _DashboardPageState extends State<DashboardPage> {
   double loamSoilPercentage = 0;
 
   int currentPage = 0;
+  String? selectedRecordKey;
   int recordsPerPage = 5;
 
   List<ProductionRecord> records = [];
@@ -268,6 +420,8 @@ class _DashboardPageState extends State<DashboardPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      key: _scaffoldKey,
+      drawer: _buildDrawer(),
       body: SafeArea(
         child: Column(
           children: [
@@ -317,18 +471,97 @@ class _DashboardPageState extends State<DashboardPage> {
     );
   }
 
+  // HAMBURGER MENU
+  Widget _buildDrawer() {
+    final email = FirebaseAuth.instance.currentUser?.email;
+    return Drawer(
+      child: Column(
+        children: [
+          Container(
+            width: double.infinity,
+            color: const Color(0xFF205D36),
+            padding: EdgeInsets.fromLTRB(
+              20,
+              MediaQuery.of(context).padding.top + 24,
+              20,
+              20,
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Icon(Icons.recycling, color: Colors.white, size: 36),
+                const SizedBox(height: 10),
+                const Text(
+                  'ECOCYCLE',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 22,
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: 1.2,
+                  ),
+                ),
+                if (email != null)
+                  Text(email, style: const TextStyle(color: Colors.white70)),
+              ],
+            ),
+          ),
+          ListTile(
+            leading: const Icon(Icons.settings),
+            title: const Text('Settings'),
+            onTap: () {
+              Navigator.of(context).pop();
+              Navigator.of(context).push(
+                MaterialPageRoute<void>(builder: (_) => const SettingsPage()),
+              );
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.info_outline),
+            title: const Text('About'),
+            onTap: () {
+              Navigator.of(context).pop();
+              Navigator.of(context).push(
+                MaterialPageRoute<void>(builder: (_) => const AboutPage()),
+              );
+            },
+          ),
+          const Spacer(),
+          const Divider(height: 1),
+          SafeArea(
+            top: false,
+            child: ListTile(
+              leading: const Icon(Icons.logout),
+              title: const Text('Log out'),
+              onTap: () {
+                Navigator.of(context).pop();
+                signOutUser();
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   // TITLE BAR
   Widget _buildTitleBar() {
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      padding: const EdgeInsets.fromLTRB(2, 10, 14, 10),
       color: const Color(0xFF205D36),
       child: Row(
         children: [
-          Flexible(
+          Expanded(
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
+                IconButton(
+                  tooltip: 'Menu',
+                  onPressed: () => _scaffoldKey.currentState?.openDrawer(),
+                  iconSize: 36,
+                  icon: const Icon(Icons.menu, color: Colors.white),
+                ),
+                const SizedBox(width: 4),
                 const Icon(Icons.recycling, color: Colors.white, size: 32),
                 const SizedBox(width: 12),
                 const Flexible(
@@ -367,14 +600,6 @@ class _DashboardPageState extends State<DashboardPage> {
                   color: Colors.white,
                   fontWeight: FontWeight.w600,
                 ),
-              ),
-              const SizedBox(width: 16),
-              IconButton(
-                tooltip: 'Toggle demo connection',
-                onPressed: () {
-                  setState(() => isOnline = !isOnline);
-                },
-                icon: const Icon(Icons.sync, color: Colors.white),
               ),
             ],
           ),
@@ -419,38 +644,30 @@ class _DashboardPageState extends State<DashboardPage> {
 
   // HOPPER STATUS
   Widget _buildHopperSection() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        const Padding(
-          padding: EdgeInsets.only(bottom: 8),
-          child: Text(
-            'Hopper Status',
-            style: TextStyle(fontSize: 19, fontWeight: FontWeight.bold),
+    return _sectionCard(
+      title: 'Hopper Status',
+      icon: Icons.inventory_2_outlined,
+      child: Row(
+        children: [
+          Expanded(
+            child: _buildHopperCard(
+              title: 'Food Waste',
+              percentage: foodWastePercentage,
+              icon: Icons.compost,
+              color: const Color(0xFF398451),
+            ),
           ),
-        ),
-        Row(
-          children: [
-            Expanded(
-              child: _buildHopperCard(
-                title: 'Food Waste',
-                percentage: foodWastePercentage,
-                icon: Icons.compost,
-                color: const Color(0xFF398451),
-              ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: _buildHopperCard(
+              title: 'Loam Soil',
+              percentage: loamSoilPercentage,
+              icon: Icons.grass,
+              color: const Color(0xFFB17B3B),
             ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: _buildHopperCard(
-                title: 'Loam Soil',
-                percentage: loamSoilPercentage,
-                icon: Icons.grass,
-                color: const Color(0xFFB17B3B),
-              ),
-            ),
-          ],
-        ),
-      ],
+          ),
+        ],
+      ),
     );
   }
 
@@ -465,7 +682,7 @@ class _DashboardPageState extends State<DashboardPage> {
       child: Container(
         padding: const EdgeInsets.all(12),
         decoration: BoxDecoration(
-          color: Colors.white,
+          color: const Color(0xFFF4F7F5),
           borderRadius: BorderRadius.circular(12),
           border: Border.all(color: const Color(0xFFE0E7E2)),
         ),
@@ -501,7 +718,7 @@ class _DashboardPageState extends State<DashboardPage> {
                         painter: _GaugePainter(
                           value: (percentage / 100).clamp(0.0, 1.0),
                           color: color,
-                          trackColor: const Color(0xFFE9EEE9),
+                          trackColor: const Color(0xFFDDE6DF),
                           strokeWidth: 10,
                         ),
                       ),
@@ -563,6 +780,7 @@ class _DashboardPageState extends State<DashboardPage> {
                   ),
                   columnSpacing: 0,
                   horizontalMargin: 0,
+                  showCheckboxColumn: false,
                   columns: [
                     DataColumn(
                       label: cell(mainWidth, const Text('Batch Number')),
@@ -575,7 +793,20 @@ class _DashboardPageState extends State<DashboardPage> {
                     DataColumn(label: cell(extraWidth, const Text('Time'))),
                   ],
                   rows: visibleRecords.map((record) {
+                    final key =
+                        '${record.batchNumber}|${record.date}|${record.time}';
                     return DataRow(
+                      selected: key == selectedRecordKey,
+                      color: WidgetStateProperty.resolveWith((states) {
+                        return states.contains(WidgetState.selected)
+                            ? const Color(0xFFCDE8D5)
+                            : null;
+                      }),
+                      onSelectChanged: (_) => setState(() {
+                        selectedRecordKey = key == selectedRecordKey
+                            ? null
+                            : key;
+                      }),
                       cells: [
                         DataCell(
                           cell(

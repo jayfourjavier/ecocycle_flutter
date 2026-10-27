@@ -15,3 +15,25 @@ A few resources to get you started if this is your first Flutter project:
 For help getting started with Flutter development, view the
 [online documentation](https://docs.flutter.dev/), which offers tutorials,
 samples, guidance on mobile development, and a full API reference.
+
+## LAYOUT
+
+```txt
+|--------------------|
+| TITLE BAR  (DOT RED / GREEEN) Online / Offline |
+|--------------------|
+|Current Activity |
+| (activity name) |
+|--------------------|
+|Hopper Status |
+|-------------------|---------------------------|
+|Food Waste{percentage} | Loam Soil{percentage} |
+|-------------------|---------------------------|
+|Production Records |
+|Batch Number | Date | Time | Moisture | Temperature |
+|(table) | (table) | (table) | (table) | (table) |
+|(tabulation nav <prev (dropdown show number of records) next>)
+|-------------------|---------------------------|
+
+
+```
