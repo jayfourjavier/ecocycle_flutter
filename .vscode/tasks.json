@@ -1,0 +1,21 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Launch Pixel 10",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "$avd = 'Pixel_10'; $devices = flutter devices --machine | ConvertFrom-Json; if (-not ($devices | Where-Object { $_.id -like 'emulator-*' })) { flutter emulators --launch $avd; $ready = $false; for ($i = 0; $i -lt 60; $i++) { Start-Sleep -Seconds 2; $devices = flutter devices --machine | ConvertFrom-Json; if ($devices | Where-Object { $_.id -like 'emulator-*' -and $_.id -eq 'emulator-5554' }) { $ready = $true; break } }; if (-not $ready) { throw 'Pixel 10 emulator did not become ready within 120 seconds.' } }"
+            ],
+            "problemMatcher": [],
+            "runOptions": {
+                "runOn": "folderOpen"
+            }
+        }
+    ]
+}

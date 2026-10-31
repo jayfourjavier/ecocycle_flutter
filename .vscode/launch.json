@@ -1,0 +1,13 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "ECOCYCLE - Pixel 10 Debug",
+            "type": "dart",
+            "request": "launch",
+            "flutterMode": "debug",
+            "deviceId": "emulator-5554",
+            "preLaunchTask": "Launch Pixel 10"
+        }
+    ]
+}
